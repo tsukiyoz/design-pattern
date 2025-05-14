@@ -5,13 +5,11 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"go.uber.org/zap" //https://github.com/uber-go/zap
-	//Blazing fast, structured, leveled logging in Go.
+	"go.uber.org/zap" // https://github.com/uber-go/zap
+	// Blazing fast, structured, leveled logging in Go.
 )
 
-var (
-	log, _ = zap.NewDevelopment()
-)
+var log, _ = zap.NewDevelopment()
 
 // Settings of pipeline
 const (
@@ -35,7 +33,7 @@ type worker struct {
 	chain      chan interface{}
 	debug      bool
 	idle       uint32
-	dispatcher IDispatcher //hold a dispacher，需要自己实现一个dispatcher 工厂
+	dispatcher IDispatcher // hold a dispacher，需要自己实现一个dispatcher 工厂
 }
 
 // Pipeline of workers
@@ -52,9 +50,6 @@ func (p *Pipeline) Start(ctx context.Context) {
 	go func(pipe *Pipeline) {
 		for {
 			expectationWorkers := len(pipe.chain) % MaxWorkers
-			if expectationWorkers >= MaxWorkers {
-				expectationWorkers = 0
-			}
 			select {
 			case <-ctx.Done():
 				return
@@ -75,7 +70,6 @@ func (p *Pipeline) Dispatch(msg interface{}) {
 
 // NewPipeline create a Workflow  with a dispacher builder and some workers
 func NewPipeline(d DispatcherBuilder, idle uint32, debug bool) *Pipeline {
-
 	ch := make(chan interface{}, MasterQueueSize)
 
 	wk := make(map[int]*worker)
@@ -86,7 +80,7 @@ func NewPipeline(d DispatcherBuilder, idle uint32, debug bool) *Pipeline {
 			mutex:      new(sync.Mutex),
 			debug:      debug,
 			idle:       idle,
-			dispatcher: d(), //build real dispatcher
+			dispatcher: d(), // build real dispatcher
 		}
 	}
 	return &Pipeline{workers: wk, chain: ch}
@@ -94,51 +88,53 @@ func NewPipeline(d DispatcherBuilder, idle uint32, debug bool) *Pipeline {
 
 func (c *worker) stream(val interface{}) {
 	c.chain <- val
-	if !c.running {
-		c.mutex.Lock()
-		c.running = true
-		ctx, cancel := context.WithCancel(context.Background())
-		defer func(w *worker, cancel context.CancelFunc) {
-			if w.debug {
-				log.Info("Worker leaving", zap.Any("index", w.index), zap.Any("idle", w.idle))
-			}
+	if c.running {
+		return
+	}
 
-			if c.dispatcher != nil {
-				err := c.dispatcher.After()
-				if err != nil {
-					log.Error("can not finish track issue", zap.Error(err))
-				}
-			}
-
-			cancel()
-			w.mutex.Unlock()
-			w.running = false
-		}(c, cancel)
+	c.mutex.Lock()
+	c.running = true
+	ctx, cancel := context.WithCancel(context.Background())
+	defer func(w *worker, cancel context.CancelFunc) {
+		if w.debug {
+			log.Info("Worker leaving", zap.Any("index", w.index), zap.Any("idle", w.idle))
+		}
 
 		if c.dispatcher != nil {
-			err := c.dispatcher.Before(ctx)
+			err := c.dispatcher.After()
 			if err != nil {
-				log.Error("can not start worker", zap.Error(err))
+				log.Error("can not finish track issue", zap.Error(err))
 			}
 		}
 
-		var idle uint32 = 0
-		for {
-			select {
-			case msg := <-c.chain:
-				atomic.StoreUint32(&idle, 0)
-				if msg != nil && c.dispatcher != nil {
-					err := c.dispatcher.Process(msg)
-					if err != nil {
-						log.Error("can not process message", zap.Any("msg", &msg), zap.Error(err))
-					}
+		cancel()
+		w.mutex.Unlock()
+		w.running = false
+	}(c, cancel)
+
+	if c.dispatcher != nil {
+		err := c.dispatcher.Before(ctx)
+		if err != nil {
+			log.Error("can not start worker", zap.Error(err))
+		}
+	}
+
+	var idle uint32 = 0
+	for {
+		select {
+		case msg := <-c.chain:
+			atomic.StoreUint32(&idle, 0)
+			if msg != nil && c.dispatcher != nil {
+				err := c.dispatcher.Process(msg)
+				if err != nil {
+					log.Error("can not process message", zap.Any("msg", &msg), zap.Error(err))
 				}
-			default:
-				atomic.AddUint32(&idle, 1)
-				if i := atomic.LoadUint32(&idle); i > 0 {
-					if i > c.idle {
-						return
-					}
+			}
+		default:
+			atomic.AddUint32(&idle, 1)
+			if i := atomic.LoadUint32(&idle); i > 0 {
+				if i > c.idle {
+					return
 				}
 			}
 		}
